@@ -2,6 +2,11 @@
 import os
 import logging
 import boto3
+import pandas as pd
+from io import StringIO, BytesIO
+
+from xetra.common.constants import S3FileTypes
+from xetra.common.custom_exceptions import WrongFormatException
 
 class S3BucketConnector():
     """
@@ -16,7 +21,7 @@ class S3BucketConnector():
         :param endpoint_url: endpoint url to S3
         :param bucket: S3 bucket name
         """
-        self._logger = logging.getLogger(name=__name__)
+        self._logger = logging.getLogger(__name__)
         self.endpoint_url = endpoint_url
         self.session=boto3.Session(aws_access_key_id=os.environ[access_key],
                                    aws_secret_access_key=os.environ[secret_key])
@@ -27,7 +32,7 @@ class S3BucketConnector():
         """
         listing all files with a prefix on the s3 bucket
 
-        :param prefix: prefgix on the S3 bucket that should be filtered with 
+        :param prefix: prefix on the S3 bucket that should be filtered with 
 
         returns:
          files list of all file names containing the prefix in the key
@@ -35,10 +40,57 @@ class S3BucketConnector():
         files = [obj.key for obj in self._bucket.objects.filter(Prefix=prefix)]
         return files
 
-    def read_csv_to_df(self):
-        pass
-    
-    def write_df_to_s3(self):
-        pass   
+    def read_csv_to_df(self,key: str,encoding: str = 'utf-8', sep: str = ','): 
+        """
+        reading a csv file from the S3 bucket and returning a dataframe
 
-     
+        :param key: key of the file that should be read
+        :encoding: encoding of the data inside the csv file
+        :sep: seperator of the csv file
+
+        returns:
+          data_frame: Pandas DataFrame containg the data of the csv file
+        """
+        self._logger.info('Reading file %s/%s/%s', self.endpoint_url, self._bucket.name, key)       
+        csv_obj = self._bucket.Object(key=key).get().get('Body').read().decode(encoding)
+        data = StringIO(csv_obj)
+        data_frame = pd.read_csv(data,sep = sep)
+        return data_frame
+
+    
+    def write_df_to_s3(self, data_frame: pd.DataFrame, key: str, file_format: str): 
+        """
+        writing a pandas dataframe to the S3 bucket
+        supported format: .parquet, .csv
+
+        :key: key of the file that is written
+        :data_frane: a Pandas Data Frame that is written
+        :file_format: format of the saved file
+        """       
+        if data_frame.empty:
+           self._logger.info('The DataFrame is empty. No file will be written!') 
+           return None
+
+        if file_format== S3FileTypes.PARQUET.value:
+           out_buffer =BytesIO()
+           data_frame.to_parquet(out_buffer,index=False)
+           return self.__put_object(out_buffer, key)
+
+        if file_format== S3FileTypes.CSV.value:
+            out_buffer =StringIO()
+            data_frame.to_csv(out_buffer,index=False)
+            return self.__put_object(out_buffer, key) 
+
+        self._logger.info('The file %s format is not supported to be written to s3!', file_format)
+        raise WrongFormatException     
+
+    def __put_object(self, out_buffer: StringIO or BytesIO, key: str):
+        """
+        Helper function for self.write_df_to_s3
+
+        :out_buffer: StringIO or BytesIO that should be written
+        :key: target key of the saved file
+        """
+        self._logger.info('Writing file to %s/%s/%s', self.endpoint_url, self._bucket.name, key)
+        self._bucket.put_object(Body=out_buffer.getvalue(), Key = key) 
+        return True     
